@@ -60,18 +60,21 @@ format and an unpatched kernel. The reliable choice today is an **N2 VM
 running Debian 13** (GQI-QPL, kernel 6.12): every GQI machine series is
 affected on every kernel since 5.16, including mainline. C3 and other
 DQO-RDA series are affected only on kernels up to 6.12 (Debian 13 qualifies;
-Ubuntu 24.04's 7.0 kernel does not). From a machine with `gcloud`:
+Ubuntu 24.04's 7.0 kernel does not). From a machine with `gcloud`, asking
+for a gVNIC interface explicitly, since N2 gets virtio-net by default:
 
 ```sh
 gcloud compute instances create gve-repro --machine-type=n2-standard-4 \
-    --image-family=debian-13 --image-project=debian-cloud --zone=us-central1-a
+    --image-family=debian-13 --image-project=debian-cloud --zone=us-central1-a \
+    --network-interface=nic-type=GVNIC
 gcloud compute ssh gve-repro --zone=us-central1-a
 ```
 
-On the VM (it needs `sudo`, `curl`, `ethtool`, `python3` and `git`, all of
-which Debian 13's image has):
+On the VM, install `git` (Debian 13's image ships `sudo`, `curl`, `ethtool`
+and `python3`, but not `git`), clone, and run:
 
 ```sh
+sudo apt-get install -y git
 git clone https://github.com/AmaanC/kernel-bias && cd kernel-bias
 URL=http://deb.debian.org/debian/dists/bookworm/main/binary-amd64/Packages.xz PORT=8808 ./reproduce.sh
 ```
@@ -123,6 +126,9 @@ for i in $(seq 200); do curl -so /dev/null \
 
 **If it doesn't show.**
 
+- *`INCONCLUSIVE: ens4 uses virtio_net, not gve`*: the VM has a virtio
+  NIC. The NIC type can't be changed on an existing VM; delete it and
+  create one with `--network-interface=nic-type=GVNIC`.
 - *`INCONCLUSIVE: ... uses page_pool`*: a DQO-RDA VM on 6.13 or newer
   isn't affected. Use an N2 (GQI) VM, or an older kernel.
 - *`NO BUG` on a VM that should be affected*: the failures need fresh
@@ -143,7 +149,9 @@ load it in place of the stock module (`modprobe -r gve; insmod gve.ko`), then
 run `reproduce.sh` again. The patch applies with `-p6` to the driver
 directory extracted from the kernel.org tree at the kernel's version. The
 module is only loaded, never installed: a reboot brings the stock driver
-back. Expect the network to drop for a few seconds, and have a second way in.
+back. The VM must not have Secure Boot on, or the unsigned module won't load
+(`--no-shielded-secure-boot` at creation). Expect the network to drop for a
+few seconds, and have a second way in.
 
 ## Tested on
 
