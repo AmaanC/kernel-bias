@@ -56,17 +56,32 @@ context lines, file names (6.12 and older set the DQO bias in
 ## Reproduce
 
 You need a Google Cloud VM with a gVNIC interface in an affected queue
-format and an unpatched kernel. The reliable choice today is an **N2 VM
-running Debian 13** (GQI-QPL, kernel 6.12): every GQI machine series is
-affected on every kernel since 5.16, including mainline. C3 and other
-DQO-RDA series are affected only on kernels up to 6.12 (Debian 13 qualifies;
-Ubuntu 24.04's 7.0 kernel does not). From a machine with `gcloud`, asking
-for a gVNIC interface explicitly, since N2 gets virtio-net by default:
+format and an unpatched kernel. Two combinations are known to work, from a
+machine with `gcloud`:
+
+**C3 with Debian 13** (DQO-RDA, kernel 6.12). C3 is a gVNIC-only series,
+so no extra flag is needed. DQO-RDA is affected only on kernels up to 6.12,
+so the image matters: Debian 13 qualifies, Ubuntu 24.04's 7.0 kernel does
+not.
+
+```sh
+gcloud compute instances create gve-repro --machine-type=c3-standard-4 \
+    --image-family=debian-13 --image-project=debian-cloud --zone=us-central1-a
+```
+
+**N2 with Debian 13** (GQI-QPL, kernel 6.12). GQI is affected on every
+kernel since 5.16, mainline included, so this is the one for a newer kernel.
+N2 gets virtio-net by default, so ask for gVNIC explicitly:
 
 ```sh
 gcloud compute instances create gve-repro --machine-type=n2-standard-4 \
     --image-family=debian-13 --image-project=debian-cloud --zone=us-central1-a \
     --network-interface=nic-type=GVNIC
+```
+
+Then:
+
+```sh
 gcloud compute ssh gve-repro --zone=us-central1-a
 ```
 
