@@ -1,0 +1,161 @@
+From c6b8c76f791b4326b53fa3e8f6220578713f2ae9 Mon Sep 17 00:00:00 2001
+From: Amaan Cheval <amaan.cheval@gmail.com>
+Date: Fri, 30 Oct 2026 10:46:31 +0000
+Subject: [PATCH net] gve: leave refcount headroom in the RX page bias
+
+gve's GQI and DQO-QPL RX paths set every RX page's refcount to INT_MAX and
+hand references to the stack by decrementing page_info->pagecnt_bias, to
+avoid an atomic op per packet. This leaves the page no headroom: while a
+fresh page's buffer sits in an skb its refcount is already INT_MAX, so a
+single get_page() from the stack wraps it negative.
+
+splice() of received TCP data into a pipe takes such a reference, and the
+onward splice into a socket then fails: skb_splice_from_iter() sees
+page_count() < 1, sendpage_ok() fails and the send returns -EIO (since
+commit 2e910b95329c ("net: Add a function to splice pages into an
+skbuff for MSG_SPLICE_PAGES"))
+
+tee() of the pipe fails with -EFAULT via try_get_page(). On GQI the reuse
+check gve_rx_can_recycle_buffer() also sees page_count() < pagecnt_bias,
+WARNs and calls gve_schedule_reset(), so a task that merely pins a fresh
+RX page (e.g. holds spliced data in an undrained tee() pipe) can reset
+the NIC.
+
+Use USHRT_MAX in a u16, as igb, igc, ixgbe, i40e and hns3 do: the bias only
+has to make the per-packet atomic rare so a small value leaves page_count()
+ample headroom below INT_MAX for the stack's references, and the u16 bounds
+it. Refill by adding a fixed batch and setting the bias to it, which keeps
+the rule `references = page_count() - bias` intact.
+
+Reproduced on gVNIC in GQI-QPL mode (GCE n2-standard-8, 6.12), no kernel
+changes needed, with relay.py -- a small splice(2) TCP proxy -- relaying a
+download while the RX ring is refilled with fresh pages:
+
+  ethtool -G eth0 rx 512 && ethtool -G eth0 rx 1024   # fresh RX pages
+  ./relay.py $HOST 8080 &                             # splice()s both ways
+  for i in $(seq 200); do curl -so /dev/null \
+      --connect-to $HOST:80:127.0.0.1:8080 http://$HOST/file; done
+
+Most downloads failed with EIO before the fix (tee() with EFAULT) and all
+completed after it, including with the bias forced to 1. Built allmodconfig
+W=1, no new warnings; no selftests run. relay.py is at the Link below.
+
+This bug was found and fixed with the help of an AI coding assistant
+(Claude Code) over an interactive session; it read the driver and
+splice/pipe code and ran the tests above.
+
+Link: https://github.com/amaanc/kernel-bias
+Fixes: 9b8dd5e5ea48 ("gve: DQO: Add RX path")
+Fixes: 58401b2a46e7 ("gve: Add rx buffer pagecnt bias")
+Fixes: 82fd151d38d9 ("gve: Reduce alloc and copy costs in the GQ rx path")
+Cc: stable@vger.kernel.org
+Signed-off-by: Amaan Cheval <amaan.cheval@gmail.com>
+---
+ drivers/net/ethernet/google/gve/gve.h                |  2 +-
+ .../net/ethernet/google/gve/gve_buffer_mgmt_dqo.c    |  4 ++--
+ drivers/net/ethernet/google/gve/gve_rx.c             |  8 ++++----
+ drivers/net/ethernet/google/gve/gve_utils.c          | 12 +++---------
+ drivers/net/ethernet/google/gve/gve_utils.h          |  8 +++++++-
+ 5 files changed, 17 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/net/ethernet/google/gve/gve.h b/drivers/net/ethernet/google/gve/gve.h
+index b7ce6e8632db..18d7edbf4b3b 100644
+--- a/drivers/net/ethernet/google/gve/gve.h
++++ b/drivers/net/ethernet/google/gve/gve.h
+@@ -119,7 +119,7 @@ struct gve_rx_slot_page_info {
+ 	void *page_address;
+ 	u32 page_offset; /* offset to write to in page */
+ 	unsigned int buf_size;
+-	int pagecnt_bias; /* expected pagecnt if only the driver has a ref */
++	u16 pagecnt_bias; /* expected pagecnt if only the driver has a ref */
+ 	u16 pad; /* adjustment for rx padding */
+ 	u8 can_flip; /* tracks if the networking stack is using the page */
+ };
+diff --git a/drivers/net/ethernet/google/gve/gve_buffer_mgmt_dqo.c b/drivers/net/ethernet/google/gve/gve_buffer_mgmt_dqo.c
+index 6880d1531ba5..571f851d6dcd 100644
+--- a/drivers/net/ethernet/google/gve/gve_buffer_mgmt_dqo.c
++++ b/drivers/net/ethernet/google/gve/gve_buffer_mgmt_dqo.c
+@@ -149,8 +149,8 @@ int gve_alloc_qpl_page_dqo(struct gve_rx_ring *rx,
+ 	buf_state->last_single_ref_offset = 0;
+ 
+ 	/* The page already has 1 ref. */
+-	page_ref_add(buf_state->page_info.page, INT_MAX - 1);
+-	buf_state->page_info.pagecnt_bias = INT_MAX;
++	page_ref_add(buf_state->page_info.page, GVE_PAGECNT_BIAS - 1);
++	buf_state->page_info.pagecnt_bias = GVE_PAGECNT_BIAS;
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/ethernet/google/gve/gve_rx.c b/drivers/net/ethernet/google/gve/gve_rx.c
+index 81ea800e66e9..6533fff06155 100644
+--- a/drivers/net/ethernet/google/gve/gve_rx.c
++++ b/drivers/net/ethernet/google/gve/gve_rx.c
+@@ -152,8 +152,8 @@ static void gve_setup_rx_buffer(struct gve_rx_ring *rx,
+ 	page_info->buf_size = rx->packet_buffer_size;
+ 	*slot_addr = cpu_to_be64(addr);
+ 	/* The page already has 1 ref */
+-	page_ref_add(page, INT_MAX - 1);
+-	page_info->pagecnt_bias = INT_MAX;
++	page_ref_add(page, GVE_PAGECNT_BIAS - 1);
++	page_info->pagecnt_bias = GVE_PAGECNT_BIAS;
+ }
+ 
+ static int gve_rx_alloc_buffer(struct gve_priv *priv, struct device *dev,
+@@ -230,8 +230,8 @@ static int gve_rx_prefill_pages(struct gve_rx_ring *rx,
+ 			rx->qpl_copy_pool[j].buf_size = rx->packet_buffer_size;
+ 
+ 			/* The page already has 1 ref. */
+-			page_ref_add(page, INT_MAX - 1);
+-			rx->qpl_copy_pool[j].pagecnt_bias = INT_MAX;
++			page_ref_add(page, GVE_PAGECNT_BIAS - 1);
++			rx->qpl_copy_pool[j].pagecnt_bias = GVE_PAGECNT_BIAS;
+ 		}
+ 	}
+ 
+diff --git a/drivers/net/ethernet/google/gve/gve_utils.c b/drivers/net/ethernet/google/gve/gve_utils.c
+index caed38cd5f2b..cb6fba3122d5 100644
+--- a/drivers/net/ethernet/google/gve/gve_utils.c
++++ b/drivers/net/ethernet/google/gve/gve_utils.c
+@@ -93,15 +93,9 @@ void gve_dec_pagecnt_bias(struct gve_rx_slot_page_info *page_info)
+ {
+ 	page_info->pagecnt_bias--;
+ 	if (page_info->pagecnt_bias == 0) {
+-		int pagecount = page_count(page_info->page);
+-
+-		/* If we have run out of bias - set it back up to INT_MAX
+-		 * minus the existing refs.
+-		 */
+-		page_info->pagecnt_bias = INT_MAX - pagecount;
+-
+-		/* Set pagecount back up to max. */
+-		page_ref_add(page_info->page, INT_MAX - pagecount);
++		/* Out of bias: take another batch of references. */
++		page_info->pagecnt_bias = GVE_PAGECNT_BIAS;
++		page_ref_add(page_info->page, GVE_PAGECNT_BIAS);
+ 	}
+ }
+ 
+diff --git a/drivers/net/ethernet/google/gve/gve_utils.h b/drivers/net/ethernet/google/gve/gve_utils.h
+index bf2e9a0adb36..316f97607351 100644
+--- a/drivers/net/ethernet/google/gve/gve_utils.h
++++ b/drivers/net/ethernet/google/gve/gve_utils.h
+@@ -25,7 +25,13 @@ struct sk_buff *gve_rx_copy_data(struct net_device *dev, struct napi_struct *nap
+ struct sk_buff *gve_rx_copy(struct net_device *dev, struct napi_struct *napi,
+ 			    struct gve_rx_slot_page_info *page_info, u16 len);
+ 
+-/* Decrement pagecnt_bias. Set it back to INT_MAX if it reached zero. */
++/* Up-front references gve holds on an RX page, so handing a buffer to the
++ * stack is a pagecnt_bias decrement, not a get_page(). Keep it in a u16 so
++ * the 32-bit page refcount keeps the headroom every page needs below INT_MAX.
++ */
++#define GVE_PAGECNT_BIAS USHRT_MAX
++
++/* Decrement pagecnt_bias. Top it up by GVE_PAGECNT_BIAS if it reached zero. */
+ void gve_dec_pagecnt_bias(struct gve_rx_slot_page_info *page_info);
+ 
+ void gve_add_napi(struct gve_priv *priv, int ntfy_idx,
+
+base-commit: d8a4f4c59da52b7c31ae337243b8473a19a3f819
+-- 
+2.47.3
+
