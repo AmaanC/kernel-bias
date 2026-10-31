@@ -73,8 +73,14 @@ which Debian 13's image has):
 
 ```sh
 git clone https://github.com/AmaanC/kernel-bias && cd kernel-bias
-./reproduce.sh
+URL=http://deb.debian.org/debian/dists/bookworm/main/binary-amd64/Packages.xz PORT=8808 ./reproduce.sh
 ```
+
+`URL=` must point outside the VM, so that the download comes in through the
+gve driver: an internet URL like the Debian mirror above, or a file served
+by a peer VM. Anything on the VM itself, 127.0.0.1 included, goes over
+loopback and never touches gve. `PORT=` is where `relay.py` listens on
+127.0.0.1; pick one that's free.
 
 It checks that the NIC is gve and in a format that has the bias, resizes
 the RX ring so gve allocates fresh pages (the network drops for about a
