@@ -55,23 +55,56 @@ context lines, file names (6.12 and older set the DQO bias in
 
 ## Reproduce
 
-On a Google Cloud VM with a gVNIC interface in an affected queue format (N2
-and other GQI machine series on any kernel since 5.16; C3 and other DQO-RDA
-series on kernels up to 6.12), with `sudo`, `curl`, `ethtool` and Python 3:
+You need a Google Cloud VM with a gVNIC interface in an affected queue
+format and an unpatched kernel. The reliable choice today is an **N2 VM
+running Debian 13** (GQI-QPL, kernel 6.12): every GQI machine series is
+affected on every kernel since 5.16, including mainline. C3 and other
+DQO-RDA series are affected only on kernels up to 6.12 (Debian 13 qualifies;
+Ubuntu 24.04's 7.0 kernel does not). From a machine with `gcloud`:
+
+```sh
+gcloud compute instances create gve-repro --machine-type=n2-standard-4 \
+    --image-family=debian-13 --image-project=debian-cloud --zone=us-central1-a
+gcloud compute ssh gve-repro --zone=us-central1-a
+```
+
+On the VM (it needs `sudo`, `curl`, `ethtool`, `python3` and `git`, all of
+which Debian 13's image has):
 
 ```sh
 git clone https://github.com/AmaanC/kernel-bias && cd kernel-bias
 ./reproduce.sh
 ```
 
-It resizes the RX ring so gve allocates fresh pages (the network drops for a
+It checks that the NIC is gve and in a format that has the bias, resizes
+the RX ring so gve allocates fresh pages (the network drops for about a
 second), starts `relay.py`, downloads a file from the Debian mirror 200
-times through it, and ends with one of:
+times through it, and ends with the verdict and the kernel's own warnings
+from this run. It takes a few minutes. On an affected VM:
 
 ```
-BUG PRESENT: splice() failed with EIO 78 times, tee() with EFAULT 0 times.
-NO BUG: all 200 downloads completed.
+== 5. Result
+complete downloads:  0 of 100
+EIO from splice():   100
+EFAULT from tee():   not checked (RELAY="relay.py --tee" checks it)
+kernel warnings since the ring resize (sudo dmesg):
+  [192412.224458] WARNING: CPU: 5 PID: 1198138 at net/core/skbuff.c:7324 skb_splice_from_iter+0x118/0x300
+  [192412.374141] RDX: 0000000080000000 RSI: ff34c0bcc1881c00 RDI: ff89153145163c60
+
+BUG PRESENT: splice() failed with EIO 100 times, tee() with EFAULT 0 times.
+For the full traces: sudo dmesg | grep -A20 'skb_splice_from_iter\|generic_pipe_buf_get'
 ```
+
+(That run: Debian 13, 6.12.113, DQO-RDA, `RUNS=100`. On GQI-QPL VMs 20
+to 80 of 100 typically fail; the share depends on how fresh the pages are.)
+
+`RDX` is the page's refcount at the check: `0x80000000` is `INT_MAX + 1`,
+wrapped negative. The full trace is in `sudo dmesg`. With
+`RELAY="relay.py --tee"` (automatic on kernels before 6.5, where `splice()`
+into a socket doesn't check the page) you also get `EFAULT` from `tee()`
+and its warning, `at include/linux/mm.h:... generic_pipe_buf_get`. Exit
+status 1 means bug present, 0 no bug, 2 inconclusive, with the reason
+printed.
 
 That's the sequence in the patch's changelog, in one script:
 
@@ -82,12 +115,22 @@ for i in $(seq 200); do curl -so /dev/null \
     --connect-to $HOST:80:127.0.0.1:8080 http://$HOST/file; done
 ```
 
-The file must come from another host over the gve NIC (`URL=` overrides the
-mirror); anything served from the VM itself goes over loopback and never
-touches gve. On kernels before 6.5, `splice()` into a socket doesn't check
-the page, so use `RELAY="relay.py --tee"` to catch `tee()`'s `EFAULT`
-instead. Failures cluster while the pages are fresh and fade as pages are
-reused, which is why the ring is resized first.
+**If it doesn't show.**
+
+- *`INCONCLUSIVE: ... uses page_pool`*: a DQO-RDA VM on 6.13 or newer
+  isn't affected. Use an N2 (GQI) VM, or an older kernel.
+- *`NO BUG` on a VM that should be affected*: the failures need fresh
+  pages. The script resizes the ring for that; if `ethtool -G` isn't
+  supported, reload the driver (`sudo modprobe -r gve && sudo modprobe gve`)
+  and run again right away. A VM that has been passing traffic for a while
+  without a resize completes every download.
+- *No warning in dmesg, but EIOs counted*: the kernel prints each warning
+  once per boot. The script re-arms it through debugfs
+  (`/sys/kernel/debug/clear_warn_once`); without debugfs, the warning from
+  an earlier run this boot is the one to look at.
+- *The file must come from another host* over the gve NIC (`URL=`
+  overrides the mirror). Anything served from the VM itself goes over
+  loopback and never touches gve.
 
 **To verify the fix**, build gve for the running kernel with the patch and
 load it in place of the stock module (`modprobe -r gve; insmod gve.ko`), then
