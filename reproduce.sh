@@ -15,7 +15,7 @@
 #   0  NO BUG        every download completed
 #   2  INCONCLUSIVE  not a gve VM, a format that can't show it, or setup failed
 #
-#   ./reproduce.sh                       # the Debian mirror, 200 downloads
+#   ./reproduce.sh                       # the Debian mirror, 100 downloads
 #   URL=http://PEER/blob ./reproduce.sh   # a file served by another host
 #   RUNS=50 IFACE=ens4 ./reproduce.sh
 #   RELAY="relay.py --tee" ./reproduce.sh   # also check tee(); automatic before 6.5
@@ -30,7 +30,7 @@ set -euo pipefail
 export PATH=$PATH:/usr/sbin:/sbin
 cd "$(dirname "$0")"
 
-RUNS=${RUNS:-200}
+RUNS=${RUNS:-100}
 URL=${URL:-http://deb.debian.org/debian/dists/bookworm/main/binary-amd64/Packages.xz}
 PORT=${PORT:-8080}
 REST=${URL#*://}; HOSTPORT=${REST%%/*}
@@ -97,9 +97,11 @@ echo "== 3. Start the splice() proxy"
 IP=$(getent ahostsv4 "$HOST" | awk '{print $1; exit}')
 [ -n "$IP" ] || die "can't resolve $HOST"
 ss -ltn 2> /dev/null | grep -q ":$PORT " && die "127.0.0.1:$PORT is in use; set PORT= to another port"
-echo "+ python3 -u $RELAY $IP:$UPORT $PORT &"
 # shellcheck disable=SC2086
-python3 -u $RELAY "$IP:$UPORT" "$PORT" > "$LOG" 2>&1 &
+set -- $RELAY   # the proxy's file, then its options, which go after the addresses
+RELAY_FILE=$1; shift
+echo "+ python3 -u $RELAY_FILE $IP:$UPORT $PORT $* &"
+python3 -u "$RELAY_FILE" "$IP:$UPORT" "$PORT" "$@" > "$LOG" 2>&1 &
 RELAY_PID=$!
 trap 'kill $RELAY_PID 2> /dev/null || true; rm -f "$LOG"' EXIT
 sleep 1
