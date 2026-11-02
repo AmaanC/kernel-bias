@@ -1,7 +1,8 @@
-From c6b8c76f791b4326b53fa3e8f6220578713f2ae9 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Amaan Cheval <amaan.cheval@gmail.com>
-Date: Fri, 30 Oct 2026 10:46:31 +0000
-Subject: [PATCH net] gve: leave refcount headroom in the RX page bias
+Date: Mon,  2 Nov 2026 16:55:54 +0530
+Subject: [PATCH net v2] gve: leave refcount headroom in the RX page bias
+Message-ID: <20261102112613.18334-1-amaan.cheval@gmail.com>
 
 gve's GQI and DQO-QPL RX paths set every RX page's refcount to INT_MAX and
 hand references to the stack by decrementing page_info->pagecnt_bias, to
@@ -13,32 +14,45 @@ splice() of received TCP data into a pipe takes such a reference, and the
 onward splice into a socket then fails: skb_splice_from_iter() sees
 page_count() < 1, sendpage_ok() fails and the send returns -EIO (since
 commit 2e910b95329c ("net: Add a function to splice pages into an
-skbuff for MSG_SPLICE_PAGES"))
+skbuff for MSG_SPLICE_PAGES")). tee() of the pipe fails with -EFAULT via
+try_get_page(). On GQI the reuse check gve_rx_can_recycle_buffer() also
+sees page_count() < pagecnt_bias, WARNs and calls gve_schedule_reset(),
+so a task that merely pins a fresh RX page (e.g. holds spliced data in
+an undrained tee() pipe) can reset the NIC.
 
-tee() of the pipe fails with -EFAULT via try_get_page(). On GQI the reuse
-check gve_rx_can_recycle_buffer() also sees page_count() < pagecnt_bias,
-WARNs and calls gve_schedule_reset(), so a task that merely pins a fresh
-RX page (e.g. holds spliced data in an undrained tee() pipe) can reset
-the NIC.
-
-Use USHRT_MAX in a u16, as igb, igc, ixgbe, i40e and hns3 do: the bias only
-has to make the per-packet atomic rare so a small value leaves page_count()
-ample headroom below INT_MAX for the stack's references, and the u16 bounds
-it. Refill by adding a fixed batch and setting the bias to it, which keeps
+Use USHRT_MAX in a u16, as igb, igc, ixgbe, i40e and hns3 do: the bias
+only has to make the per-packet atomic rare, so a small value leaves
+page_count() ample headroom below INT_MAX for the stack's references.
+Refill by adding a fixed batch and setting the bias to it, which keeps
 the rule `references = page_count() - bias` intact.
 
-Reproduced on gVNIC in GQI-QPL mode (GCE n2-standard-8, 6.12), no kernel
-changes needed, with relay.py -- a small splice(2) TCP proxy -- relaying a
-download while the RX ring is refilled with fresh pages:
+Refill when the bias drops to 1, not 0, so the driver always keeps one
+reference of its own. That matters when a consumer returns its
+reference before the driver has decremented the bias:
+DQO-QPL passes the QPL page itself to xdp_do_redirect() and only calls
+gve_dec_pagecnt_bias() afterwards, and an AF_XDP socket in copy mode
+returns the buffer synchronously via xdp_return_buff(). If the refill
+waits for bias 0, the last handoff of each batch happens at bias 1,
+when the reference being handed off is the page's only one, and that
+put_page() frees a page that is still DMA-mapped and registered with
+the device as part of the QPL. That is a use-after-free: the driver
+then takes new references on freed memory and re-posts the buffer, so
+the NIC keeps writing packets into a page that may already belong to
+someone else. INT_MAX hid this because one page had to be handed off
+2^31 times to get there; a 16-bit bias gets there after 65535.
+
+Reproduced on gVNIC in GQI-QPL mode (GCE n2-standard-8, 6.12) and
+in DQO-RDA mode (GCE c3-standard-8, 6.12) with the help of
+relay.py -- a small splice(2) TCP proxy -- relaying a download while
+the RX ring is refilled with fresh pages:
 
   ethtool -G eth0 rx 512 && ethtool -G eth0 rx 1024   # fresh RX pages
   ./relay.py $HOST 8080 &                             # splice()s both ways
   for i in $(seq 200); do curl -so /dev/null \
       --connect-to $HOST:80:127.0.0.1:8080 http://$HOST/file; done
 
-Most downloads failed with EIO before the fix (tee() with EFAULT) and all
-completed after it, including with the bias forced to 1. Built allmodconfig
-W=1, no new warnings; no selftests run. relay.py is at the Link below.
+Most downloads failed with EIO before the fix (tee() with EFAULT) and
+all completed after it. relay.py is at the Link below.
 
 This bug was found and fixed with the help of an AI coding assistant
 (Claude Code) over an interactive session; it read the driver and
@@ -51,12 +65,29 @@ Fixes: 82fd151d38d9 ("gve: Reduce alloc and copy costs in the GQ rx path")
 Cc: stable@vger.kernel.org
 Signed-off-by: Amaan Cheval <amaan.cheval@gmail.com>
 ---
- drivers/net/ethernet/google/gve/gve.h                |  2 +-
- .../net/ethernet/google/gve/gve_buffer_mgmt_dqo.c    |  4 ++--
- drivers/net/ethernet/google/gve/gve_rx.c             |  8 ++++----
- drivers/net/ethernet/google/gve/gve_utils.c          | 12 +++---------
- drivers/net/ethernet/google/gve/gve_utils.h          |  8 +++++++-
- 5 files changed, 17 insertions(+), 17 deletions(-)
+v1: https://lore.kernel.org/netdev/20261031173449.2439047-1-amaan.cheval@gmail.com/
+
+v2:
+ - Refill when the bias reaches 1 instead of 0 so the driver keeps a
+   reference of its own across every handoff. At bias 0 a consumer that
+   returns its reference synchronously, such as an AF_XDP socket in copy
+   mode on an XDP_REDIRECT from DQO-QPL, freed a page still registered in
+   the QPL.
+ - Commit message: explain the refill point, drop the build notes.
+
+Re-tested on 6.12.113 (c3-standard-8, DQO-RDA, which still uses the
+bias on 6.12), fixes EIO/EFAULT from splice/tee nor a NIC device reset
+after applying the patch.
+DQO-QPL is untested; I have no access to that hardware.
+
+Built allmodconfig W=1, no new warnings.
+
+ drivers/net/ethernet/google/gve/gve.h           |  2 +-
+ .../ethernet/google/gve/gve_buffer_mgmt_dqo.c   |  4 ++--
+ drivers/net/ethernet/google/gve/gve_rx.c        |  8 ++++----
+ drivers/net/ethernet/google/gve/gve_utils.c     | 17 ++++++++---------
+ drivers/net/ethernet/google/gve/gve_utils.h     |  8 +++++++-
+ 5 files changed, 22 insertions(+), 17 deletions(-)
 
 diff --git a/drivers/net/ethernet/google/gve/gve.h b/drivers/net/ethernet/google/gve/gve.h
 index b7ce6e8632db..18d7edbf4b3b 100644
@@ -113,30 +144,36 @@ index 81ea800e66e9..6533fff06155 100644
  	}
  
 diff --git a/drivers/net/ethernet/google/gve/gve_utils.c b/drivers/net/ethernet/google/gve/gve_utils.c
-index caed38cd5f2b..cb6fba3122d5 100644
+index caed38cd5f2b..adcdccd54684 100644
 --- a/drivers/net/ethernet/google/gve/gve_utils.c
 +++ b/drivers/net/ethernet/google/gve/gve_utils.c
-@@ -93,15 +93,9 @@ void gve_dec_pagecnt_bias(struct gve_rx_slot_page_info *page_info)
+@@ -92,16 +92,15 @@ struct sk_buff *gve_rx_copy(struct net_device *dev, struct napi_struct *napi,
+ void gve_dec_pagecnt_bias(struct gve_rx_slot_page_info *page_info)
  {
  	page_info->pagecnt_bias--;
- 	if (page_info->pagecnt_bias == 0) {
+-	if (page_info->pagecnt_bias == 0) {
 -		int pagecount = page_count(page_info->page);
 -
 -		/* If we have run out of bias - set it back up to INT_MAX
 -		 * minus the existing refs.
--		 */
++	if (page_info->pagecnt_bias == 1) {
++		/* Refill at 1, not 0: the page's own reference is counted
++		 * in the bias, and a consumer can put the reference we just
++		 * handed off before we get here (e.g. a synchronous
++		 * XDP_REDIRECT return). At bias 0 that put would free a
++		 * page that is still mapped for the NIC.
+ 		 */
 -		page_info->pagecnt_bias = INT_MAX - pagecount;
 -
 -		/* Set pagecount back up to max. */
 -		page_ref_add(page_info->page, INT_MAX - pagecount);
-+		/* Out of bias: take another batch of references. */
 +		page_info->pagecnt_bias = GVE_PAGECNT_BIAS;
-+		page_ref_add(page_info->page, GVE_PAGECNT_BIAS);
++		page_ref_add(page_info->page, GVE_PAGECNT_BIAS - 1);
  	}
  }
  
 diff --git a/drivers/net/ethernet/google/gve/gve_utils.h b/drivers/net/ethernet/google/gve/gve_utils.h
-index bf2e9a0adb36..316f97607351 100644
+index bf2e9a0adb36..a5e3413234d0 100644
 --- a/drivers/net/ethernet/google/gve/gve_utils.h
 +++ b/drivers/net/ethernet/google/gve/gve_utils.h
 @@ -25,7 +25,13 @@ struct sk_buff *gve_rx_copy_data(struct net_device *dev, struct napi_struct *nap
@@ -150,12 +187,10 @@ index bf2e9a0adb36..316f97607351 100644
 + */
 +#define GVE_PAGECNT_BIAS USHRT_MAX
 +
-+/* Decrement pagecnt_bias. Top it up by GVE_PAGECNT_BIAS if it reached zero. */
++/* Decrement pagecnt_bias. Top it up to GVE_PAGECNT_BIAS if it reached 1. */
  void gve_dec_pagecnt_bias(struct gve_rx_slot_page_info *page_info);
  
  void gve_add_napi(struct gve_priv *priv, int ntfy_idx,
-
-base-commit: d8a4f4c59da52b7c31ae337243b8473a19a3f819
 -- 
-2.47.3
+2.49.0
 
