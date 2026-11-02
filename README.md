@@ -134,7 +134,8 @@ v2 sent to netdev on 2026-11-02:
 [lore](https://lore.kernel.org/netdev/20261102112613.18334-1-amaan.cheval@gmail.com/),
 [patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261102112613.18334-1-amaan.cheval@gmail.com/).
 v1 (2026-10-31, refilled at bias 0):
-[lore](https://lore.kernel.org/netdev/20261031173449.2439047-1-amaan.cheval@gmail.com/).
+[lore](https://lore.kernel.org/netdev/20261031173449.2439047-1-amaan.cheval@gmail.com/),
+[patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261031173449.2439047-1-amaan.cheval@gmail.com/).
 
 ## License
 
