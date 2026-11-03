@@ -19,12 +19,8 @@ connection on the NIC; pinning a fresh RX page is enough to trigger it.
 
 **The fix.** Use a bias of `USHRT_MAX` in a `u16`, as igb, igc, ixgbe, i40e
 and hns3 do, so the type bounds it and the count keeps ample headroom. When
-the bias is down to 1, add a fixed batch of references instead of topping
-the count back up to `INT_MAX`, so the refill can't go negative or race,
-and so the driver always keeps one reference of its own: a consumer that
-returns a buffer synchronously (an AF_XDP socket in copy mode, on an
-`XDP_REDIRECT` from DQO-QPL) would otherwise free a page still registered
-with the NIC.
+the bias runs out, add a fixed batch of references instead of topping the
+count back up to `INT_MAX`, so the refill can't go negative or race.
 
 ## Reproduce
 
@@ -115,25 +111,32 @@ If it doesn't show:
 
 DQO-RDA moved to page_pool in 6.13, so on 7.x only GQI and DQO-QPL are
 affected. The fix also passed with the bias forced to 1, with `--tee`, and
-behind Go and HAProxy proxies; built `allmodconfig W=1` clean. v2, which
-moves the refill from bias 0 to bias 1, was re-tested on c3-standard-8
-(DQO-RDA, 6.12.113): no `EIO`, `EFAULT` or reset.
+behind Go and HAProxy proxies; built `allmodconfig W=1` clean. Re-tested
+on c3-standard-8 (DQO-RDA, 6.12.113): no `EIO`, `EFAULT` or reset. v3's
+diff is v1's; Harshitha Ramamurthy (Google) reviewed and tested it.
 
 ## What's here
 
 | | |
 |---|---|
-| [`patches/`](patches/) | `[PATCH net v2]` as it went to netdev, applying on netdev/net [`d8a4f4c59da5`](https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net.git/commit/?id=d8a4f4c59da52b7c31ae337243b8473a19a3f819), and its SHA-256 (`sha256sum -c patches/SHA256SUMS`). Backports to 6.12.y, 6.6.y, 6.1.y and 5.15.y differ only in context and can be regenerated from it |
+| [`patches/`](patches/) | `[PATCH net v3]` as it went to netdev, based on netdev/net [`21f57ec673a1`](https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net.git/commit/?id=21f57ec673a1917547c808cfa81890485fffa03b), and its SHA-256 (`sha256sum -c patches/SHA256SUMS`). Backports to 6.12.y, 6.6.y, 6.1.y and 5.15.y differ only in context and can be regenerated from it |
 | [`relay.py`](relay.py), [`reproduce.sh`](reproduce.sh) | The reproducer and the script around it |
 | [`docs/call-graph.md`](docs/call-graph.md) | One RX page from allocation to `EIO`, `EFAULT` and the reset, in code; why the fix is correct; the kprobes that measured it |
 | [`docs/call-graph-igb.md`](docs/call-graph-igb.md) | The same path through igb, which uses the same trick safely, and why |
 
+The branch [`archive/v3`](https://github.com/amaanc/kernel-bias/tree/archive/v3)
+is frozen at the v3 submission, so `relay.py` and `reproduce.sh` stay where
+a future bisect can find them even if `main` moves on.
+
 ## Upstream status
 
-v2 sent to netdev on 2026-11-02:
+v3 sent to netdev on 2026-11-03, with Reviewed-by and Tested-by from Google:
+[lore](https://lore.kernel.org/netdev/20261103090651.35399-1-amaan.cheval@gmail.com/),
+[patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261103090651.35399-1-amaan.cheval@gmail.com/).
+v2 (2026-11-02, refilled at bias 1 for an XDP case DQO-QPL turned out not to support):
 [lore](https://lore.kernel.org/netdev/20261102112613.18334-1-amaan.cheval@gmail.com/),
 [patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261102112613.18334-1-amaan.cheval@gmail.com/).
-v1 (2026-10-31, refilled at bias 0):
+v1 (2026-10-31):
 [lore](https://lore.kernel.org/netdev/20261031173449.2439047-1-amaan.cheval@gmail.com/),
 [patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261031173449.2439047-1-amaan.cheval@gmail.com/).
 

@@ -47,10 +47,9 @@ none. That's why the bug shows up after boot, and after a ring resize.
 **The fix** has gve take 65,535 tickets at a time (`USHRT_MAX`), as Intel's
 drivers do. The trick works as well: the counter changes once every 65,535
 times gve hands the box out, instead of every time. And the counter keeps
-more than two billion numbers free for everyone else. When gve is down to
-its last ticket, it takes another 65,534: it adds them, instead of filling
-the counter back up to the top, as the old code did, and it never lets go
-of that last one. And gve's note
+more than two billion numbers free for everyone else. When gve has handed
+out all its tickets, it takes another 65,535: it adds them, instead of
+filling the counter back up to the top, as the old code did. And gve's note
 now only has room for numbers up to 65,535 (a `u16`), so nobody can make
 the batch big again by mistake.
 
@@ -68,11 +67,7 @@ Why that's correct, and not just enough to pass the test:
   take by subtracting the ones everyone else holds. With batches of 65,535,
   that could come out negative, because others can hold more than 65,535
   tickets on one box: `tee()` into enough pipes does it. Adding a new batch
-  can't go negative. And the fix refills at the last ticket rather than
-  at none, because a ticket can come back before gve has written the
-  handout down (an AF_XDP socket in copy mode returns an `XDP_REDIRECT`ed
-  buffer on the spot); at zero, that return would be the box's last use,
-  and the box would be recycled while the NIC still writes into it.
+  can't go negative.
 
 With a batch of one ticket, the trick turns into the plain way: one counter
 change per packet. The fix passes the test that way too.
@@ -462,10 +457,9 @@ reference takes it to `65536`.
 the page gets sent. Both probes record zero hits. (They were measured with the
 first version of the fix, `INT_MAX / 2`; the probes don't depend on the bias.)
 
-When the bias is down to 1, after 65534 handoffs of one page, the fix adds
-another 65534 references, where the old code waited for 0 and filled the
-count back up to `INT_MAX`. The next section explains why both parts
-matter.
+When the bias runs out, after 65535 handoffs of one page, the fix adds a
+whole new bias of references, where the old code filled the count back up
+to `INT_MAX`. The next section explains why that matters.
 
 ## Why the fix is correct
 
@@ -483,7 +477,7 @@ by the same amount, or moves a reference from one side to the other:
 | Set up a page: `gve_setup_rx_buffer()`, the copy pool, `gve_alloc_qpl_page_dqo()` | B | 1 + (B − 1) | 0 |
 | Hand a buffer to an skb, then `gve_dec_pagecnt_bias()` | −1 | | +1 |
 | Anyone's `get_page()` or `put_page()` | | ±1 | ±1 |
-| Refill when b reaches 1: `page_ref_add(page, B − 1)` | +(B − 1) | +(B − 1) | |
+| Refill when b reaches 0: `page_ref_add(page, B)` | +B | +B | |
 | Free the page: `page_ref_sub(page, b − 1)`, then gve's last `put_page()` | gone | −b | |
 
 So `page_count() == pagecnt_bias` means exactly "nobody else holds the page"
@@ -491,16 +485,13 @@ So `page_count() == pagecnt_bias` means exactly "nobody else holds the page"
 exactly R (`gve_buf_ref_cnt()`).
 
 **2. gve owns a reference to every page it uses: b ≥ 1.** Otherwise the
-stack's last `put_page()` would free a page that is still in the ring.
-`gve_dec_pagecnt_bias()` refills when b reaches 1, so b never reaches 0 at
-all. The first version of the fix refilled at 0, on the grounds that the
-buffer just handed out sits in an skb gve hasn't passed up yet. That isn't
-always so: DQO-QPL passes the page to `xdp_do_redirect()` before it calls
-`gve_dec_pagecnt_bias()`, and an AF_XDP socket in copy mode returns the
-buffer synchronously. At b = 1 the reference being handed off is the
-page's only one, and that `put_page()` frees a page still DMA-mapped and
-registered in the QPL. `INT_MAX` hid this because a page had to be handed
-off 2^31 times to get there; a 16-bit bias gets there after 65,535.
+stack's last `put_page()` would free a page that is still in the ring. b
+reaches 0 only inside `gve_dec_pagecnt_bias()`, which refills it on the
+spot. The buffer it has just handed out is in an skb that gve hasn't passed
+up yet, so the page can't be freed in between.
+(v2 of the patch refilled at 1 instead, in case DQO-QPL's `XDP_REDIRECT`
+path returned the buffer before the decrement. DQO-QPL isn't meant to
+support XDP and will be blocked from it separately, so v3 went back to 0.)
 
 The old refill set b to `INT_MAX - page_count()`, which is `INT_MAX - R`.
 That's at least 1 only while R < B. With B = `INT_MAX`, that always held.
@@ -509,9 +500,9 @@ references to one page. Each `tee()` of a pipe that holds the page makes
 one more, and a process can keep tens of thousands of pipes open. b would
 go negative, the page would be freed while still in the ring, and the free
 path's `page_ref_sub(page, b - 1)` would then add references instead of
-dropping them. The patch's refill adds B − 1, so b goes from 1 straight to
-B, whatever R is. It also no longer reads `page_count()` first, so
-references that other CPUs take or drop in between can't throw it off.
+dropping them. The patch's refill adds B, so b goes from 0 straight to B,
+whatever R is. It also no longer reads `page_count()` first, so references
+that other CPUs take or drop in between can't throw it off.
 
 **3. gve leaves room for everyone else: b + R ≤ INT_MAX.** b ≤ B, so this
 holds while R ≤ INT_MAX − B. With B = `USHRT_MAX`, that's 2,147,418,112
@@ -541,9 +532,9 @@ error: unsigned conversion from 'int' to 'u16' {aka 'short unsigned int'}
 **The size of B doesn't affect correctness,** only how often the refill's
 `lock addl` runs. B = 1 is the plain approach, one atomic increment per
 buffer, which is plainly correct. The patched driver passes the test with
-B = 1 too (100 of 100 downloads, with `relay.py --tee`, on the first
-version of the fix). With `USHRT_MAX`, the refill runs once per 65,534
-handouts of a page.
+B = 1 too (100 of 100 downloads, with `relay.py --tee`). There,
+every handout goes through the refill, which with `USHRT_MAX` runs once per
+65,535 handouts of a page.
 
 **What the test can't show.** It never holds more than a few references to
 one page, so it can't tell the old refill from the new one: `INT_MAX / 2`
