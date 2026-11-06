@@ -465,7 +465,7 @@ to `INT_MAX`. The next section explains why that matters.
 
 Passing the test only shows that the symptom is gone. These three rules
 make the bias safe whatever the workload does, and the patch keeps each of
-them everywhere gve touches the bias. Write B for `GVE_PAGECNT_BIAS`, b for
+them everywhere gve touches the bias. Write B for the bias, `USHRT_MAX`, b for
 a page's `pagecnt_bias`, and R for the references everyone else holds:
 skbs, pipes, sockets.
 
@@ -489,9 +489,10 @@ stack's last `put_page()` would free a page that is still in the ring. b
 reaches 0 only inside `gve_dec_pagecnt_bias()`, which refills it on the
 spot. The buffer it has just handed out is in an skb that gve hasn't passed
 up yet, so the page can't be freed in between.
-(v2 of the patch refilled at 1 instead, in case DQO-QPL's `XDP_REDIRECT`
-path returned the buffer before the decrement. DQO-QPL isn't meant to
-support XDP and will be blocked from it separately, so v3 went back to 0.)
+(v2 of the patch refilled at 1 instead, because DQO-QPL's `XDP_REDIRECT`
+path can hand the buffer to an AF_XDP socket in copy mode, which returns
+it before the decrement. DQO-QPL never advertised XDP, so v3 went back to
+0, and v4's patch 1/2 refuses XDP on DQO-QPL outright.)
 
 The old refill set b to `INT_MAX - page_count()`, which is `INT_MAX - R`.
 That's at least 1 only while R < B. With B = `INT_MAX`, that always held.

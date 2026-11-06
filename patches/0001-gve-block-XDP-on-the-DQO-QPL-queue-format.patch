@@ -1,0 +1,54 @@
+From 055e1a04e84f7c7c8ac9f47d651428884106fec8 Mon Sep 17 00:00:00 2001
+From: Amaan Cheval <amaan.cheval@gmail.com>
+Date: Fri, 6 Nov 2026 04:31:12 +0000
+Subject: [PATCH net v4 1/2] gve: block XDP on the DQO-QPL queue format
+
+Commit d8a8ca14c937 ("gve: add XDP_TX and XDP_REDIRECT support for DQ
+RDA") enabled XDP on DQO-RDA by dropping the queue_format check from
+verify_xdp_configuration(), which until then refused every format but
+GQI-QPL. Nothing replaced it for DQO-QPL: gve_set_netdev_xdp_features()
+advertises no XDP features there and gve_xdp_xmit() rejects it, but the
+core only checks that ndo_bpf exists, so a native XDP program, and an
+AF_XDP socket on top of it, can still be attached on DQO-QPL.
+
+The DQO-QPL RX path was never written for that. Its page accounting
+assumes the driver keeps a reference of its own across every handoff:
+gve_xdp_done_dqo() passes the buffer to xdp_do_redirect() and then
+recycles it with gve_reuse_buffer(), so a redirect target that releases
+the buffer synchronously, such as an AF_XDP socket in copy mode, can
+drop the page's last reference when pagecnt_bias runs out. The page is
+then freed while it is still DMA-mapped and registered in the QPL, and
+the driver posts it back to the device.
+
+Refuse XDP program setup on DQO-QPL in gve_verify_xdp_configuration(),
+matching the features the driver advertises. A zero-copy XSK pool bind
+is already refused by the core for the same reason, and a copy-mode
+bind never reaches the driver and is harmless without a program.
+
+Fixes: d8a8ca14c937 ("gve: add XDP_TX and XDP_REDIRECT support for DQ RDA")
+Cc: stable@vger.kernel.org
+Signed-off-by: Amaan Cheval <amaan.cheval@gmail.com>
+---
+ drivers/net/ethernet/google/gve/gve_main.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/net/ethernet/google/gve/gve_main.c b/drivers/net/ethernet/google/gve/gve_main.c
+index 2437cd8ba633..4e9e692a0ed0 100644
+--- a/drivers/net/ethernet/google/gve/gve_main.c
++++ b/drivers/net/ethernet/google/gve/gve_main.c
+@@ -1723,6 +1723,12 @@ static int gve_verify_xdp_configuration(struct net_device *dev,
+ 	struct gve_priv *priv = netdev_priv(dev);
+ 	u16 max_xdp_mtu;
+ 
++	if (priv->queue_format == GVE_DQO_QPL_FORMAT) {
++		NL_SET_ERR_MSG_MOD(extack,
++				   "XDP is not supported in DQO QPL queue format.");
++		return -EOPNOTSUPP;
++	}
++
+ 	if (dev->features & NETIF_F_GRO_HW) {
+ 		NL_SET_ERR_MSG_MOD(extack,
+ 				   "XDP is not supported when HW-GRO is on.");
+-- 
+2.47.3
+

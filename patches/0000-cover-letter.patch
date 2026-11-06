@@ -1,0 +1,51 @@
+From f8bb4461781d0f1c70eb5095bd6909bf9744482f Mon Sep 17 00:00:00 2001
+From: Amaan Cheval <amaan.cheval@gmail.com>
+Date: Fri, 6 Nov 2026 09:31:20 +0000
+Subject: [PATCH net v4 0/2] gve: fix RX page refcount overflow with the pagecnt bias
+
+gve's GQI and DQO-QPL RX paths bias every RX page's refcount to INT_MAX,
+so a single get_page() from the stack, e.g. splice() of received data,
+overflows it: splice/tee fail with EIO/EFAULT and GQI can reset the
+NIC. Patch 2 lowers the bias to USHRT_MAX, as other drivers do.
+
+With the smaller bias the driver gives up its last reference on a page
+once every USHRT_MAX handoffs instead of once every INT_MAX, which is
+only safe while every consumer holds its reference until the buffer is
+recycled. That is not the case for an XDP_REDIRECT from DQO-QPL to an
+AF_XDP socket in copy mode, a path the driver never meant to support:
+commit d8a8ca14c937 dropped the queue_format check that used to refuse
+it. Patch 1 restores that check for DQO-QPL, so patch 2 depends on it.
+Trees before 6.17 still have the old check, so there patch 2 stands
+alone.
+
+Harshitha mentioned on v2 that Google would send a patch blocking XDP
+on DQO-QPL; if one is already in flight I'm happy to drop patch 1 in
+its favour.
+
+v4:
+ - Add patch 1/2 blocking XDP on DQO-QPL (Sashiko).
+ - Say "overflow" instead of "headroom"; use USHRT_MAX directly instead
+   of a macro (Maciej).
+ - Say which trees need patch 1, for stable.
+v3: https://lore.kernel.org/netdev/20261103090651.35399-1-amaan.cheval@gmail.com/
+v2: https://lore.kernel.org/netdev/20261102112613.18334-1-amaan.cheval@gmail.com/
+v1: https://lore.kernel.org/netdev/20261031173449.2439047-1-amaan.cheval@gmail.com/
+
+
+Amaan Cheval (2):
+  gve: block XDP on the DQO-QPL queue format
+  gve: fix RX page refcount overflow from the pagecnt bias
+
+ drivers/net/ethernet/google/gve/gve.h                |  2 +-
+ .../net/ethernet/google/gve/gve_buffer_mgmt_dqo.c    |  4 ++--
+ drivers/net/ethernet/google/gve/gve_main.c           |  6 ++++++
+ drivers/net/ethernet/google/gve/gve_rx.c             |  8 ++++----
+ drivers/net/ethernet/google/gve/gve_utils.c          | 12 ++++--------
+ drivers/net/ethernet/google/gve/gve_utils.h          |  2 +-
+ 6 files changed, 18 insertions(+), 16 deletions(-)
+
+
+base-commit: 21f57ec673a1917547c808cfa81890485fffa03b
+-- 
+2.47.3
+
