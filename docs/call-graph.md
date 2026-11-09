@@ -492,7 +492,9 @@ up yet, so the page can't be freed in between.
 (v2 of the patch refilled at 1 instead, because DQO-QPL's `XDP_REDIRECT`
 path can hand the buffer to an AF_XDP socket in copy mode, which returns
 it before the decrement. DQO-QPL never advertised XDP, so v3 went back to
-0, and v4's patch 1/2 refuses XDP on DQO-QPL outright.)
+0, and since v4 the series' patch 1/2 refuses XDP there outright; v5 keys
+that on the XDP features the driver advertises rather than on the queue
+format.)
 
 The old refill set b to `INT_MAX - page_count()`, which is `INT_MAX - R`.
 That's at least 1 only while R < B. With B = `INT_MAX`, that always held.

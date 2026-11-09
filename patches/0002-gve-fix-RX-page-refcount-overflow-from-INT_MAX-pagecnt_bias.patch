@@ -1,8 +1,10 @@
-From f8bb4461781d0f1c70eb5095bd6909bf9744482f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Amaan Cheval <amaan.cheval@gmail.com>
-Date: Fri, 6 Nov 2026 04:31:12 +0000
-Subject: [PATCH net v4 2/2] gve: fix RX page refcount overflow from the
- pagecnt bias
+Date: Mon, 9 Nov 2026 15:34:37 +0530
+Subject: [PATCH net v5 2/2] gve: fix RX page refcount overflow from INT_MAX pagecnt_bias
+Message-ID: <20261109100437.331423-3-amaan.cheval@gmail.com>
+In-Reply-To: <20261109100437.331423-1-amaan.cheval@gmail.com>
+References: <20261109100437.331423-1-amaan.cheval@gmail.com>
 
 gve's GQI and DQO-QPL RX paths set every RX page's refcount to INT_MAX and
 hand references to the stack by decrementing page_info->pagecnt_bias, to
@@ -62,7 +64,9 @@ Tested-by: Harshitha Ramamurthy <hramamurthy@google.com>
 Reviewed-by: Maciej Fijalkowski <maciej.fijalkowski@intel.com>
 Signed-off-by: Amaan Cheval <amaan.cheval@gmail.com>
 ---
-v4:
+v5:
+ - Name INT_MAX in the subject. No code change; patch 1/2 changed.
+v4: https://lore.kernel.org/netdev/20261106114551.212675-3-amaan.cheval@gmail.com/
  - Add patch 1/2, blocking XDP on DQO-QPL, which this fix depends on
    (Sashiko). Harshitha said Google would send such a patch; I'm happy
    to drop 1/2 in favour of theirs.
@@ -192,5 +196,4 @@ index bf2e9a0adb36..c686142d37ea 100644
  
  void gve_add_napi(struct gve_priv *priv, int ntfy_idx,
 -- 
-2.47.3
-
+2.49.0

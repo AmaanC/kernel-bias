@@ -1,4 +1,4 @@
-# gve: fix RX page refcount overflow from the pagecnt bias
+# gve: fix RX page refcount overflow with the pagecnt bias
 
 A fix for the Linux `gve` driver (gVNIC on Google Cloud), with the
 reproducer and the analysis behind it.
@@ -24,8 +24,9 @@ count back up to `INT_MAX`, so the refill can't go negative or race. Handing
 out the last reference once every 65,535 buffers instead of once every two
 billion is only safe while every consumer keeps its reference until the
 driver has recycled the buffer. An `XDP_REDIRECT` from DQO-QPL to an AF_XDP
-socket in copy mode doesn't, and DQO-QPL never advertised XDP, so v4 comes
-as two patches: 1/2 refuses XDP on DQO-QPL, 2/2 is the fix.
+socket in copy mode doesn't, and DQO-QPL never advertised XDP, so the series
+has two patches: 1/2 refuses XDP on any queue format the driver advertises
+no XDP features for, which today means DQO-QPL; 2/2 is the fix.
 
 ## Reproduce
 
@@ -117,34 +118,41 @@ If it doesn't show:
 DQO-RDA moved to page_pool in 6.13, so on 7.x only GQI and DQO-QPL are
 affected. The fix also passed with the bias forced to 1, with `--tee`, and
 behind Go and HAProxy proxies; built `allmodconfig W=1` clean. Re-tested
-on c3-standard-8 (DQO-RDA, 6.12.113): no `EIO`, `EFAULT` or reset. v4's
-fix is v3's diff with `USHRT_MAX` used directly; Harshitha Ramamurthy
-(Google) reviewed and tested it, and Maciej Fijalkowski (Intel) reviewed it.
+on c3-standard-8 (DQO-RDA, 6.12.113): no `EIO`, `EFAULT` or reset. The
+fix (2/2) has been v3's diff with `USHRT_MAX` used directly since v4;
+Harshitha Ramamurthy (Google) reviewed and tested it, and Maciej
+Fijalkowski (Intel) reviewed it.
 
 ## What's here
 
 | | |
 |---|---|
-| [`patches/`](patches/) | The `[PATCH net v4 0/2]` cover letter and both patches as they went to netdev, based on netdev/net [`21f57ec673a1`](https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net.git/commit/?id=21f57ec673a1917547c808cfa81890485fffa03b), and their SHA-256 (`sha256sum -c patches/SHA256SUMS`). Trees before 6.17 still refuse XDP on DQO-QPL, so there 2/2 stands alone; backports to 6.12.y, 6.6.y, 6.1.y and 5.15.y differ only in context and can be regenerated from it |
+| [`patches/`](patches/) | The `[PATCH net v5 0/2]` cover letter and both patches as they went to netdev, based on netdev/net [`21f57ec673a1`](https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net.git/commit/?id=21f57ec673a1917547c808cfa81890485fffa03b), and their SHA-256 (`sha256sum -c patches/SHA256SUMS`). Trees before 6.17 still refuse XDP on DQO-QPL, so there 2/2 stands alone; backports to 6.12.y, 6.6.y, 6.1.y and 5.15.y differ only in context and can be regenerated from it |
 | [`relay.py`](relay.py), [`reproduce.sh`](reproduce.sh) | The reproducer and the script around it |
 | [`docs/call-graph.md`](docs/call-graph.md) | One RX page from allocation to `EIO`, `EFAULT` and the reset, in code; why the fix is correct; the kprobes that measured it |
 | [`docs/call-graph-igb.md`](docs/call-graph-igb.md) | The same path through igb, which uses the same trick safely, and why |
 
-The branches [`archive/v3`](https://github.com/amaanc/kernel-bias/tree/archive/v3)
-and [`archive/v4`](https://github.com/amaanc/kernel-bias/tree/archive/v4)
+The branches [`archive/v3`](https://github.com/amaanc/kernel-bias/tree/archive/v3),
+[`archive/v4`](https://github.com/amaanc/kernel-bias/tree/archive/v4)
+and [`archive/v5`](https://github.com/amaanc/kernel-bias/tree/archive/v5)
 are frozen at those submissions, so `relay.py` and `reproduce.sh` stay where
 a future bisect can find them even if `main` moves on.
 
 ## Upstream status
 
-v4 sent to netdev on 2026-11-06 as a two-patch series, 1/2 blocking XDP on
-DQO-QPL and 2/2 the fix, with a Reviewed-by from Intel added:
+v5 sent to netdev on 2026-11-09. 1/2 now keys on the XDP features the
+driver advertises instead of the queue format (Joshua Washington); 2/2 is
+unchanged apart from its subject:
+[cover letter](https://lore.kernel.org/netdev/20261109100437.331423-1-amaan.cheval@gmail.com/),
+[series on patchwork](https://patchwork.kernel.org/project/netdevbpf/list/?series=1205920);
+1/2 [lore](https://lore.kernel.org/netdev/20261109100437.331423-2-amaan.cheval@gmail.com/),
+[patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261109100437.331423-2-amaan.cheval@gmail.com/);
+2/2 [lore](https://lore.kernel.org/netdev/20261109100437.331423-3-amaan.cheval@gmail.com/),
+[patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261109100437.331423-3-amaan.cheval@gmail.com/).
+v4 (2026-11-06, first as a two-patch series, 1/2 blocking XDP on DQO-QPL by
+queue format, with a Reviewed-by from Intel added):
 [cover letter](https://lore.kernel.org/netdev/20261106114551.212675-1-amaan.cheval@gmail.com/),
-[series on patchwork](https://patchwork.kernel.org/series/1204124/);
-1/2 [lore](https://lore.kernel.org/netdev/20261106114551.212675-2-amaan.cheval@gmail.com/),
-[patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261106114551.212675-2-amaan.cheval@gmail.com/);
-2/2 [lore](https://lore.kernel.org/netdev/20261106114551.212675-3-amaan.cheval@gmail.com/),
-[patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261106114551.212675-3-amaan.cheval@gmail.com/).
+[series on patchwork](https://patchwork.kernel.org/series/1204124/).
 v3 (2026-11-03, with Reviewed-by and Tested-by from Google):
 [lore](https://lore.kernel.org/netdev/20261103090651.35399-1-amaan.cheval@gmail.com/),
 [patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261103090651.35399-1-amaan.cheval@gmail.com/).
