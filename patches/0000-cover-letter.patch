@@ -1,8 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From da07a056e7ce6b3587354b5714ff76efaae0e146 Mon Sep 17 00:00:00 2001
 From: Amaan Cheval <amaan.cheval@gmail.com>
-Date: Mon, 9 Nov 2026 15:34:35 +0530
-Subject: [PATCH net v5 0/2] gve: fix RX page refcount overflow with the pagecnt bias
-Message-ID: <20261109100437.331423-1-amaan.cheval@gmail.com>
+Date: Wed, 11 Nov 2026 11:10:50 +0000
+Subject: [PATCH net v6 0/2] gve: fix RX page refcount overflow with the pagecnt bias
 
 gve's GQI and DQO-QPL RX paths bias every RX page's refcount to INT_MAX,
 so a single get_page() from the stack, e.g. splice() of received data,
@@ -16,15 +15,15 @@ recycled. That is not the case for an XDP_REDIRECT from DQO-QPL to an
 AF_XDP socket in copy mode, a path the driver never meant to support:
 commit d8a8ca14c937 dropped the queue_format check that used to refuse
 it. Patch 1 refuses XDP on any queue format the driver advertises no
-XDP features for, which today means DQO-QPL, so patch 2 depends on it.
-Trees before 6.17 still have the old check, so there patch 2 stands
-alone.
+XDP features for, today DQO-QPL and GQI-RDA, so patch 2 depends on it.
+On GQI-RDA it also stops XDP_TX from writing into a TX FIFO that raw
+addressing never allocates. Trees before 6.17 still have the old check,
+so there patch 2 stands alone.
 
-Harshitha mentioned on v2 that Google would send a patch blocking XDP
-on DQO-QPL; if one is already in flight I'm happy to drop patch 1 in
-its favour.
-
-v5:
+v6:
+ - Patch 1: say the check also covers GQI-RDA and why that matters
+   (Sashiko). Message only; carried Joshua's Reviewed-by.
+v5: https://lore.kernel.org/netdev/20261109100437.331423-1-amaan.cheval@gmail.com/
  - Patch 1: check dev->xdp_features instead of queue_format, and
    reword the subject and message around that (Joshua).
  - Patch 2: name INT_MAX in the subject. No code change.
@@ -52,4 +51,5 @@ Amaan Cheval (2):
 
 base-commit: 21f57ec673a1917547c808cfa81890485fffa03b
 -- 
-2.49.0
+2.47.3
+

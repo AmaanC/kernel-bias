@@ -1,3 +1,3 @@
-621f1ca070d16ff92ca89e49f9ff3d580ba3b0f7b37b18a2e50dbf474b91ae1d  patches/0000-cover-letter.patch
-3fd8d6c723e37e5a78c4d1ed78c7a1eaef925753ae17703affaef7f63aa3b0df  patches/0001-gve-refuse-XDP-on-queue-formats-without-XDP-support.patch
-1eddf17bc5f3ba2466dd77fe0aad2acfc3e72505d6843340e4eb59c3af7274c6  patches/0002-gve-fix-RX-page-refcount-overflow-from-INT_MAX-pagecnt_bias.patch
+de6f4ecb6ad59e965122a8aa4711a4841437566801d41958fc34848a4fc47b3f  patches/0000-cover-letter.patch
+f2577116f5594a25d21176938f488e369cb55fc987dd2cf5cb2f12a972ceaa94  patches/0001-gve-refuse-XDP-on-queue-formats-without-XDP-support.patch
+b77ddb77697e1bb5af6878fd7382eb4b24b335816a0f2bd7a16406628c4c6569  patches/0002-gve-fix-RX-page-refcount-overflow-from-INT_MAX-pagecnt_bias.patch

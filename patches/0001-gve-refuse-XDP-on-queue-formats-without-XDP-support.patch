@@ -1,19 +1,17 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 42d73254f49daef710baec0a2ae66e538be4a37e Mon Sep 17 00:00:00 2001
 From: Amaan Cheval <amaan.cheval@gmail.com>
 Date: Mon, 9 Nov 2026 15:34:36 +0530
-Subject: [PATCH net v5 1/2] gve: refuse XDP on queue formats without XDP support
-Message-ID: <20261109100437.331423-2-amaan.cheval@gmail.com>
-In-Reply-To: <20261109100437.331423-1-amaan.cheval@gmail.com>
-References: <20261109100437.331423-1-amaan.cheval@gmail.com>
+Subject: [PATCH net v6 1/2] gve: refuse XDP on queue formats without XDP
+ support
 
 Commit d8a8ca14c937 ("gve: add XDP_TX and XDP_REDIRECT support for DQ
 RDA") enabled XDP on DQO-RDA by dropping the queue_format check from
 verify_xdp_configuration(), which until then refused every format but
 GQI-QPL. Nothing replaced it: gve_set_netdev_xdp_features() advertises
-no XDP features for DQO-QPL and gve_xdp_xmit() rejects it, but the core
-only checks that ndo_bpf exists, so a native XDP program, and an AF_XDP
-socket on top of it, can still be attached on a queue format the driver
-does not support.
+no XDP features for DQO-QPL and GQI-RDA and gve_xdp_xmit() rejects
+both, but the core only checks that ndo_bpf exists, so a native XDP
+program, and an AF_XDP socket on top of it, can still be attached on a
+queue format the driver does not support.
 
 The DQO-QPL RX path was never written for that. Its page accounting
 assumes the driver keeps a reference of its own across every handoff:
@@ -24,17 +22,27 @@ drop the page's last reference when pagecnt_bias runs out. The page is
 then freed while it is still DMA-mapped and registered in the QPL, and
 the driver posts it back to the device.
 
+GQI-RDA is no better off: an XDP_TX there goes through
+gve_tx_fill_xdp(), which copies the frame into tx->tx_fifo, but a
+raw-addressing TX ring never allocates that FIFO, so the first XDP_TX
+writes through a NULL tx_fifo.base.
+
 Refuse XDP setup in gve_verify_xdp_configuration() whenever the driver
 advertises no XDP features for the current queue format, which today
-means DQO-QPL. A zero-copy XSK pool bind is already refused by the core
-for the same reason, and a copy-mode bind never reaches the driver and
-is harmless without a program.
+means DQO-QPL and GQI-RDA. A zero-copy XSK pool bind is already refused
+by the core for the same reason, and a copy-mode bind never reaches the
+driver and is harmless without a program.
 
 Fixes: d8a8ca14c937 ("gve: add XDP_TX and XDP_REDIRECT support for DQ RDA")
 Cc: stable@vger.kernel.org
+Reviewed-by: Joshua Washington <joshwash@google.com>
 Signed-off-by: Amaan Cheval <amaan.cheval@gmail.com>
 ---
-v5:
+v6:
+ - Say the check also covers GQI-RDA, where XDP_TX writes into a TX
+   FIFO that raw addressing never allocates (Sashiko). Message only, so
+   I carried Joshua's Reviewed-by.
+v5: https://lore.kernel.org/netdev/20261109100437.331423-2-amaan.cheval@gmail.com/
  - Check dev->xdp_features instead of queue_format, and reword the
    subject and message around that (Joshua).
 v4: https://lore.kernel.org/netdev/20261106114551.212675-2-amaan.cheval@gmail.com/
@@ -60,4 +68,5 @@ index 2437cd8ba633..fe560f5c5408 100644
  		NL_SET_ERR_MSG_MOD(extack,
  				   "XDP is not supported when HW-GRO is on.");
 -- 
-2.49.0
+2.47.3
+
